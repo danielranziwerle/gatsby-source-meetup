@@ -1,5 +1,7 @@
-const fetch = require("node-fetch")
-const queryString = require("query-string")
+var fetch = require("node-fetch");
+
+var queryString = require("query-string");
+
 
 exports.createSchemaCustomization = ({ actions }) => {
   const { createTypes } = actions;
@@ -214,7 +216,7 @@ exports.createSchemaCustomization = ({ actions }) => {
     }
     type MeetupEvent implements Node {
       member_pay_fee: Boolean!
-      
+
       attendance_count: Int
       attendance_sample: MeetupEventRsvpSampleMember
       attendee_sample: MeetupEventRsvpSample
@@ -270,21 +272,16 @@ exports.createSchemaCustomization = ({ actions }) => {
   createTypes(typeDefs);
 };
 
-exports.sourceNodes = (
-  { actions, createNodeId, createContentDigest },
+exports.sourceNodes = async (
+  { actions, createNodeId, createContentDigest, reporter },
   configOptions
 ) => {
-  const { createNode } = actions
+  const { createNode } = actions;
 
-  // Gatsby adds a configOption that's not needed for this plugin, delete it
-  delete configOptions.plugins
-
-  // Processes a Meetup Group
-  const processGroup = group => {
-    const nodeId = createNodeId(`meetup-group-${group.id}`)
-
+  // Function to process each Meetup Group
+  const processGroup = (group, groupUrlName) => {
+    const nodeId = createNodeId(`meetup-group-${group.id}-${groupUrlName}`);
     const nodeData = Object.assign({}, group, {
-      ...group,
       id: nodeId,
       parent: null,
       children: [],
@@ -292,70 +289,55 @@ exports.sourceNodes = (
         type: `MeetupGroup`,
         contentDigest: createContentDigest(group),
       },
-    })
+    });
+    return nodeData;
+  };
 
-    return nodeData
-  }
-
-  // Processes a Meetup Event as a child of a Meetup Group
-  const processEvent = (event, parent) => {
-    const nodeId = createNodeId(`meetup-event-${event.id}`)
-
+  // Function to process each Meetup Event
+  const processEvent = (event, groupUrlName, parentGroupId) => {
+    const nodeId = createNodeId(`meetup-event-${event.id}-${groupUrlName}`);
     const nodeData = Object.assign({}, event, {
-      ...event,
       id: nodeId,
       meetupId: event.id,
-      parent,
+      parent: parentGroupId,
       children: [],
       internal: {
         type: `MeetupEvent`,
         contentDigest: createContentDigest(event),
       },
-    })
+    });
+    return nodeData;
+  };
 
-    return nodeData
+  // Destructure and extract the groupUrlNames and other API options
+  const { groupUrlNames, ...apiOptions } = configOptions;
+
+  // Loop through each groupUrlName and fetch data
+  for (const groupUrlName of groupUrlNames) {
+    const queryStringOptions = queryString.stringify(apiOptions);
+    const apiGroupUrl = `https://api.meetup.com/${groupUrlName}?${queryStringOptions}`;
+    const apiEventsUrl = `https://api.meetup.com/${groupUrlName}/events?${queryStringOptions}`;
+
+    try {
+      // Fetch group data
+      const groupResponse = await fetch(apiGroupUrl);
+      const groupData = await groupResponse.json();
+
+      // Fetch events data
+      const eventsResponse = await fetch(apiEventsUrl);
+      const eventsData = await eventsResponse.json();
+
+      // Process and create a node for the group
+      const groupNode = processGroup(groupData, groupUrlName);
+      createNode(groupNode);
+
+      // Process and create nodes for each event
+      eventsData.forEach(event => {
+        const eventNode = processEvent(event, groupUrlName, groupNode.id);
+        createNode(eventNode);
+      });
+    } catch (error) {
+      reporter.error(`Error fetching Meetup data for group ${groupUrlName}`, error);
+    }
   }
-
-  const { groupUrlName, eventsOptions: paramEventsOptions, ...apiOptions } = configOptions
-  const eventsOptions = paramEventsOptions?paramEventsOptions:[apiOptions];
-
-  // Convert the options object into a query string
-  const queryStringOptions = queryString.stringify(apiOptions)
-
-  const apiGroupUrl = `https://api.meetup.com/${groupUrlName}?${queryStringOptions}`;
-
-  const allApiEventsUrl = eventsOptions.map(eventApiOptions => {
-    // Convert the options object into a query string
-    const queryStringEventOptions = queryString.stringify(eventApiOptions)
-    return `https://api.meetup.com/${groupUrlName}/events?${queryStringEventOptions}`;
-  });
-
-  const allApiUrls = [
-    apiGroupUrl,
-    ...allApiEventsUrl
-  ];
-
-  // Gatsby expects sourceNodes to return a promise
-  return (
-    // Fetch a response from the apiUrl
-    Promise.all(allApiUrls.map(url => fetch(url)))
-      // Parse the response as JSON
-      .then(responses =>
-        Promise.all(responses.map(response => response.json()))
-      )
-      // Process the JSON data into a node
-      .then(dataArray => {
-        const [groupData, ...eventsDataSeparated] = dataArray;
-        const eventData = eventsDataSeparated.reduce((acc, events) => ([...acc, ...events]), []);
-        // For each query result (or 'hit')
-        let groupNode = processGroup(groupData)
-        groupNode.events___NODE = Object.values(eventData).map(event => {
-          const nodeData = processEvent(event, groupNode.id)
-          createNode(nodeData)
-          return nodeData.id
-        })
-        createNode(groupNode)
-      })
-  )
-}
-
+};
